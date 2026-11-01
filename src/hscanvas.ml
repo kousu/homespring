@@ -27,6 +27,17 @@ let surface_of_pixbuf pb =
 let render w h s =
     surface_of_pixbuf (GdkPixbuf.from_file_at_size s ~width:w ~height:h)
 
+(* Loading an svg through gdk-pixbuf takes ~30ms, far too slow to redo at every
+   zoom step. So load each icon once, at the largest size it is ever drawn at
+   (16 pixels at the maximum zoom of 4), and scale it down when drawing. *)
+let icon_px = 64
+let icons = Hashtbl.create 8
+let icon file =
+    try Hashtbl.find icons file with Not_found ->
+        let surface = render icon_px icon_px file in
+        Hashtbl.add icons file surface;
+        surface
+
 (* I/O to the textview *)
 class io (buf : GText.buffer) =
     object(self)
@@ -65,31 +76,29 @@ let insert_cb io iter s = io#insert_cb s
 much faster *)
 let init_pic = Cairo.Image.create Cairo.Image.ARGB32 ~w:1 ~h:1
 
-class gui_node group (canvas : GnoCanvas.canvas) (hs_node : node) =
-    let f_l = GnoCanvas.group canvas#root in
-
+(* A node of the river, drawn with cairo. [calc_size] measures the node and
+   its subtree, [layout] assigns canvas positions, and [draw] paints the
+   subtree. The pictures are cairo surfaces as returned by [render]. *)
+class gui_node (hs_node : node) =
     object(self)
-    method getCanvas = canvas
     val mutable children = []
-    val mutable lines = []
 
     val mutable s_pic = (init_pic, init_pic)
     val mutable w_pic = (init_pic, init_pic)
     val mutable p_pic = (init_pic, init_pic)
     val mutable f_pic = (init_pic, init_pic)
 
-    val bg = GnoCanvas.rect group
-    val text = GnoCanvas.text ~text:(printable hs_node#getName)
-                              ~anchor:`NW group
-    val snow = GnoCanvas.pixbuf group
-    val water = GnoCanvas.pixbuf group
-    val power = GnoCanvas.pixbuf group
-    val fish = GnoCanvas.pixbuf group
-
-    val fish_list = f_l
-    val fish_list_bg = GnoCanvas.rect f_l
-    val fish_list_text = GnoCanvas.text f_l
+    val label = printable hs_node#getName
+    val mutable fish_text = ""
     val mutable fish_hidden = true
+
+    (* where this node was laid out: x is its left edge, y its top edge *)
+    val mutable x = 0.0
+    val mutable y = 0.0
+
+    (* font and picture sizes, set by calc_size *)
+    val mutable point_size = 12.0
+    val mutable pic_size = 16.0
 
     (* these are the width and height of the trees rooted at this node *)
     val mutable height = 0.0
@@ -109,38 +118,25 @@ class gui_node group (canvas : GnoCanvas.canvas) (hs_node : node) =
     method getWidth = width
     method getSelfHeight = self_height
     method getSelfWidth = self_width
-
-    method reset_pixbufs =
-        snow#set [`PIXBUF (choose s_pic hs_node#hasSnow)];
-        water#set [`PIXBUF (choose w_pic hs_node#hasWater)];
-        power#set [`PIXBUF (choose p_pic hs_node#hasPower)];
-        fish#set [`PIXBUF (choose f_pic hs_node#hasSalmon)];
+    method getX = x
+    method getY = y
 
     (* build a tree of gui_nodes rooted at this node *)
     method init_tree =
-        let make_child n =
-            (new gui_node (GnoCanvas.group canvas#root) canvas n,
-             GnoCanvas.line canvas#root)
-        in
-        let x n = n#init_tree in
-        let (a,b) = List.split (List.map make_child hs_node#getChildren) in
-        children <- a; lines <- b;
-        List.iter x children;
+        let n = List.map (fun c -> new gui_node c) hs_node#getChildren in
+        children <- n;
+        List.iter (fun c -> c#init_tree) children;
 
-    (* build a tree of gui_nodes rooted at this node and lay them out. Return
-       (minx, miny, maxx, maxy) *)
-    method init =
-        self#reset_pixbufs;
-        canvas#set_pixels_per_unit 1.0;
-        canvas#set_center_scroll_region true;
+    (* build a tree of gui_nodes rooted at this node and lay them out. [cr] is
+       only used to measure text. *)
+    method init cr =
         self#init_tree;
-        self#resize 1.0;
+        self#resize cr 1.0;
 
-    (* re-layout the tree and calculate the canvas size *)
-    method resize zoom =
+    (* re-layout the tree. [cr] is only used to measure text. *)
+    method resize cr zoom =
         let size = zoom *. 16.0 in
         let point_size = zoom *. 12.0 in
-        let pic = int_of_float size in
         let datadir = 
                 try Sys.getenv "DATADIR" with Not_found -> 
                         (if (Sys.file_exists("snow_on.svg")) then "."
@@ -148,113 +144,156 @@ class gui_node group (canvas : GnoCanvas.canvas) (hs_node : node) =
                          else raise (Failure "data dir not found (set DATADIR env to directory containing e.g. snow_on.svg)"))
         in
 
-        s_pic <- ( (render pic pic (datadir^"/snow_on.svg")),
-                   (render pic pic (datadir^"/snow_off.svg")));
-        w_pic <- ( (render pic pic (datadir^"/water_on.svg")),
-                   (render pic pic (datadir^"/water_off.svg")));
-        p_pic <- ( (render pic pic (datadir^"/power_on.svg")),
-                   (render pic pic (datadir^"/power_off.svg")));
-        f_pic <- ( (render pic pic (datadir^"/fish_on.svg")),
-                   (render pic pic (datadir^"/fish_off.svg")));
-        self#calc_size ~point_size ~padding:size ~pic_size:size;
-        self#layout 0.0 0.0 ~size ~s:s_pic ~w:w_pic ~p:p_pic ~f:f_pic;
-        canvas#set_scroll_region
-            (-.size)
-            0.0
-            self#getWidth
-            (self#getHeight +. (size *. 2.0))
+        s_pic <- ( (icon (datadir^"/snow_on.svg")),
+                   (icon (datadir^"/snow_off.svg")));
+        w_pic <- ( (icon (datadir^"/water_on.svg")),
+                   (icon (datadir^"/water_off.svg")));
+        p_pic <- ( (icon (datadir^"/power_on.svg")),
+                   (icon (datadir^"/power_off.svg")));
+        f_pic <- ( (icon (datadir^"/fish_on.svg")),
+                   (icon (datadir^"/fish_off.svg")));
+        self#calc_size cr ~point_size ~padding:size ~pic_size:size;
+        self#layout 0.0 0.0 ~size ~s:s_pic ~w:w_pic ~p:p_pic ~f:f_pic
 
     (* calculate the size of this node and the size of this subtree *)
-    method calc_size ~point_size ~padding ~pic_size =
-        let x n = n#calc_size ~point_size ~padding ~pic_size in
+    method calc_size cr ~point_size:ps ~padding ~pic_size:pic =
+        let sub n = n#calc_size cr ~point_size:ps ~padding ~pic_size:pic in
         let sum_h h node = node#getHeight +. h +. padding in
         let max_w w node = max node#getWidth w in
-        text#set [`SIZE_POINTS point_size];
-        fish_list_text#set [`SIZE_POINTS (point_size *. 0.75)];
-        self_width <- max text#text_width (pic_size *. 4.0);
-        self_height <- pic_size +. text#text_height;
+        let fe =
+            Cairo.set_font_size cr ps;
+            Cairo.font_extents cr
+        in
+        point_size <- ps;
+        pic_size <- pic;
+        self_width <- max (Cairo.text_extents cr label).Cairo.x_advance
+                          (pic *. 4.0);
+        self_height <- pic +. fe.Cairo.ascent +. fe.Cairo.descent;
 
-        iter x children;
+        iter sub children;
         height <- max ((fold_left sum_h 0.0 children) -. padding) self_height;
         width <- (fold_left max_w 0.0 children) +. self_width +. padding;
 
-    (* position every node in this subtree. *)
-    method layout x y ~size ~s ~w ~p ~f =
-        let child_y = ref y in
-        let child_x = x +. self_width +. size in
-        let self_y = (y +. (height *. 0.5)) in
-        let rec lay_children = function
-            (ch::xs, line::ys) ->
-                    ch#layout child_x !child_y ~size ~s ~w ~p ~f;
-                    line#set [`POINTS 
-                                    [| (x +. self_width *. 0.5);
-                                       (self_y +. self_height *. 0.5);
-                                       (child_x +. ch#getSelfWidth *. 0.5);
-                                       (!child_y +. ch#getSelfHeight *. 0.5
-                                                 +. ch#getHeight *. 0.5) |];
-                              `FILL_COLOR "black"];
-                    line#lower_to_bottom ();
-                    lines <- line :: lines;
-                    child_y := !child_y +. ch#getHeight +. size;
-                    lay_children (xs,ys)
-          | _ -> 0.0
+    (* position every node in this subtree. (x0, y0) is the top left corner of
+       the area reserved for the subtree; this node is centred vertically in
+       it. *)
+    method layout x0 y0 ~size ~s ~w ~p ~f =
+        let child_y = ref y0 in
+        let child_x = x0 +. self_width +. size in
+        let lay_child ch =
+            ch#layout child_x !child_y ~size ~s ~w ~p ~f;
+            child_y := !child_y +. ch#getHeight +. size
         in
-        let border = size *. 0.2 in
         s_pic <- s; w_pic <- w; p_pic <- p; f_pic <- f;
-        self#reset_pixbufs;
-        group#set   [`X x;              `Y self_y];
-        snow#set    [`X 0.0;            `Y 0.0];
-        water#set   [`X size;           `Y 0.0];
-        power#set   [`X (size *. 2.0);  `Y 0.0];
-        fish#set    [`X (size *. 3.0);  `Y 0.0];
-        text#set    [`X 0.0;            `Y size];
-        bg#set      [`X1 (-.border); `X2 (self_width +. border);
-                     `Y1 (-.border); `Y2 (self_height +. border);
-                     `FILL_COLOR "white"; `OUTLINE_COLOR "black"];
-        fish_list#set [`X x; `Y (self_y +. self_height)];
-        ignore (lay_children (children, lines));
-        fish_list#raise_to_top ();
+        x <- x0;
+        y <- y0 +. (height *. 0.5);
+        iter lay_child children
 
+    (* one "M U name" row (mature/young, upstream/downstream) per salmon here;
+       tabs don't render in cairo's text API, so separate the columns with
+       spaces *)
     method update_fish_list =
-        let f_str str sal = str ^
-            (if (mature sal) then "M\t" else "Y\t") ^
-            (if (upstream sal) then "U\t" else "D\t") ^
-            (printable sal.name) ^"\n"
+        let f_str sal =
+            (if (mature sal) then "M  " else "Y  ") ^
+            (if (upstream sal) then "U  " else "D  ") ^
+            (printable sal.name)
         in
-        let t = List.fold_left f_str "" hs_node#getSalmon in
-        if String.length t > 0 then
-            fish_list_text#set [`TEXT (String.sub t 0 ((String.length t) - 1))]
-        else
-            fish_list_text#set [`TEXT ""];
-        fish_list_bg#set [`X1 (-.2.0); `Y1 (-.2.0);
-                          `X2 (fish_list_text#text_width +. 2.0);
-                          `Y2 (fish_list_text#text_height +. 2.0)];
+        fish_text <- String.concat "\n" (List.map f_str hs_node#getSalmon)
 
     method toggle_fish_list =
-        if fish_hidden then
-            (fish_hidden <- false; fish_list#show ())
-        else
-            (fish_hidden <- true; fish_list#hide ());
-        self#update_fish_list;
+        fish_hidden <- not fish_hidden;
+        self#update_fish_list
 
     method update =
-        let x n = n#update in
         if not fish_hidden then
             self#update_fish_list;
-        self#reset_pixbufs;
-        iter x children;
+        iter (fun c -> c#update) children
 
-    initializer
-        fish_list_bg#set [`X1 0.0; `Y1 0.0;
-                          `FILL_COLOR_RGBA (Int32.of_string "0xFFFFFFAA");
-                          `OUTLINE_COLOR_RGBA (Int32.of_string "0x000000FF")];
-        fish_list_text#set [`X 0.0; `Y 0.0; `ANCHOR `NW];
-        ignore (group#connect#event
-            ~callback:(function
-                `BUTTON_PRESS b ->
-                    if (GdkEvent.Button.button b) = 1 then
-                        self#toggle_fish_list; false
-                | _ -> false))
+    (* Handle a left click at canvas position (px, py): toggle the fish list of
+       the node under it. Returns true if some node was hit, in which case the
+       caller should redraw. *)
+    method click px py =
+        let border = pic_size *. 0.2 in
+        if px >= x -. border && px <= x +. self_width +. border
+           && py >= y -. border && py <= y +. self_height +. border then
+            (self#toggle_fish_list; true)
+        else
+            exists (fun c -> c#click px py) children
+
+    (* draw the lines from every node in this subtree to its children *)
+    method draw_edges cr =
+        let cx = x +. self_width *. 0.5 in
+        let cy = y +. self_height *. 0.5 in
+        let edge c =
+            Cairo.move_to cr cx cy;
+            Cairo.line_to cr (c#getX +. c#getSelfWidth *. 0.5)
+                             (c#getY +. c#getSelfHeight *. 0.5);
+            Cairo.stroke cr;
+            c#draw_edges cr
+        in
+        Cairo.set_source_rgb cr 0.0 0.0 0.0;
+        Cairo.set_line_width cr 1.0;
+        iter edge children
+
+    (* draw this node's box, pictures and name, then those of its subtree *)
+    method draw_nodes cr =
+        let border = pic_size *. 0.2 in
+        let pic i (on, off) b =
+            Cairo.save cr;
+            Cairo.translate cr (x +. pic_size *. i) y;
+            Cairo.scale cr (pic_size /. float_of_int icon_px)
+                           (pic_size /. float_of_int icon_px);
+            Cairo.set_source_surface cr (choose (on, off) b) ~x:0.0 ~y:0.0;
+            Cairo.paint cr;
+            Cairo.restore cr
+        in
+        Cairo.rectangle cr (x -. border) (y -. border)
+            ~w:(self_width +. 2.0 *. border) ~h:(self_height +. 2.0 *. border);
+        Cairo.set_source_rgb cr 1.0 1.0 1.0;
+        Cairo.fill_preserve cr;
+        Cairo.set_source_rgb cr 0.0 0.0 0.0;
+        Cairo.set_line_width cr 1.0;
+        Cairo.stroke cr;
+        pic 0.0 s_pic hs_node#hasSnow;
+        pic 1.0 w_pic hs_node#hasWater;
+        pic 2.0 p_pic hs_node#hasPower;
+        pic 3.0 f_pic hs_node#hasSalmon;
+        Cairo.set_source_rgb cr 0.0 0.0 0.0;
+        Cairo.set_font_size cr point_size;
+        Cairo.move_to cr x (y +. pic_size +. (Cairo.font_extents cr).Cairo.ascent);
+        Cairo.show_text cr label;
+        iter (fun c -> c#draw_nodes cr) children
+
+    (* draw the open fish lists of this subtree, below each node *)
+    method draw_fish cr =
+        if not fish_hidden && fish_text <> "" then begin
+            let lines = String.split_on_char '\n' fish_text in
+            Cairo.set_font_size cr (point_size *. 0.75);
+            let fe = Cairo.font_extents cr in
+            let line_h = fe.Cairo.ascent +. fe.Cairo.descent in
+            let w = fold_left
+                (fun m l -> max m (Cairo.text_extents cr l).Cairo.x_advance)
+                0.0 lines in
+            let top = y +. self_height in
+            Cairo.rectangle cr (x -. 2.0) (top -. 2.0)
+                ~w:(w +. 4.0) ~h:(line_h *. float_of_int (length lines) +. 4.0);
+            Cairo.set_source_rgba cr 1.0 1.0 1.0 (2.0 /. 3.0);
+            Cairo.fill_preserve cr;
+            Cairo.set_source_rgb cr 0.0 0.0 0.0;
+            Cairo.set_line_width cr 1.0;
+            Cairo.stroke cr;
+            List.iteri (fun i l ->
+                Cairo.move_to cr x
+                    (top +. line_h *. float_of_int i +. fe.Cairo.ascent);
+                Cairo.show_text cr l) lines
+        end;
+        iter (fun c -> c#draw_fish cr) children
+
+    (* draw the whole subtree: edges at the bottom, fish lists on top *)
+    method draw cr =
+        self#draw_edges cr;
+        self#draw_nodes cr;
+        self#draw_fish cr
 end;;
 
 class canvas (file : string) =
