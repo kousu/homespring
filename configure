@@ -60,36 +60,30 @@ if [ "${LIBS}x" == "x" ]; then
 fi
 
 echo "yes"
-echo -n "Checking for lablgtk2..."
+echo -n "Checking for lablgtk3..."
 
 if [ "${GTKLIBS}x" == "x" ]; then
-	if ! checklibs lablgtk.cmxa gtkInit.cmx > /dev/null 2>&1 ; then
+	if ! checklibs lablgtk3.cmxa > /dev/null 2>&1 ; then
 		echo "no"
 		echo \
-		"Couldn't find required libs lablgtk.cmxa and gtkInit.cmx. You might \
-		need to install lablgtk. You can override this check by specifying \
-		the GTKLIBS environment variable. Not building hsgui."
-	elif ! checklibs lablrsvg.cmxa > /dev/null 2>&1 ; then
+		"Couldn't find required lib lablgtk3.cmxa. You might need to install \
+		lablgtk3. You can override this check by specifying the GTKLIBS \
+		environment variable. Not building hsgui."
+	elif ! checklibs cairo.cmxa > /dev/null 2>&1 ; then
 		echo "no"
 		echo \
-		"Couldn't find lablrsvg.cmxa. You need to install lablgtk with svg \
-		support. You can override this check by specifying \
-		the GTKLIBS environment variable. Not building hsgui."
-	elif ! checklibs lablgnomecanvas.cmxa > /dev/null 2>&1 ; then
-		echo "no"
-		echo \
-		"Couldn't find lablgnomecanvas.cmxa. You need to install lablgtk with \
-		GnomeCanvas support. You can override this check by specifying \
-		the GTKLIBS environment variable. Not building hsgui."
+		"Couldn't find cairo.cmxa. You need to install the OCaml cairo2 \
+		bindings. You can override this check by specifying the GTKLIBS \
+		environment variable. Not building hsgui."
 	else
-		GTKLIBS="lablgtk.cmxa lablgnomecanvas.cmxa lablrsvg.cmxa gtkInit.cmx"
+		GTKLIBS="-I +cairo2 cairo.cmxa -I +threads threads.cmxa lablgtk3.cmxa"
 	fi
 fi
 
 
 if [ "${GTKLIBS}x" != "x" ]; then
 	if [ "${OCAMLFLAGS}x" == "x" ]; then
-		OCAMLFLAGS="-I +lablgtk2"
+		OCAMLFLAGS="-I +lablgtk3 -I +cairo2 -I +threads"
 	fi
 	echo "yes"
 fi

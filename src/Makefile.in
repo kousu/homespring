@@ -9,8 +9,8 @@ DATADIR=@DATADIR@
 # For bytecode builds
 OCAMLC=ocamlc
 LIBS=unix.cma str.cma
-GTKLIBS=lablgtk.cma lablgnomecanvas.cma lablrsvg.cma gtkInit.cmo
-OCAMLCFLAGS=-I +lablgtk2
+GTKLIBS=$(GTKLIBS_OPT:.cmxa=.cma)
+OCAMLCFLAGS=$(OCAMLOPTFLAGS)
 
 all: hsrun
 opt: hsrun_opt
