@@ -8,7 +8,24 @@ type homespring_state = SnowTick | WaterTick | PowerTick | FishTick | MiscTick
                       | InputTick
 
 let choose (t,f) b = if b then t else f
-let render w h s = Rsvg.render_from_file ~size_cb:(fun x y -> (w, h)) s
+
+(* lablgtk3 can't draw a pixbuf onto a cairo context, so convert it into a
+   cairo image surface. This goes through an in-memory PNG rather than reading
+   the pixels with GdkPixbuf.get_pixels: the Gpointer.region that returns holds
+   a raw C pointer, which the OCaml 5 garbage collector crashes on. *)
+let surface_of_pixbuf pb =
+    let buf = Buffer.create 4096 in
+    GdkPixbuf.save_to_buffer pb ~typ:"png" buf;
+    let png = Buffer.contents buf in
+    let pos = ref 0 in
+    Cairo.PNG.create_from_stream ~input:(fun s n ->
+        (* cairo hands us a string to fill in place *)
+        Bytes.blit_string png !pos (Bytes.unsafe_of_string s) 0 n;
+        pos := !pos + n)
+
+(* load an svg (or any image gdk-pixbuf can read) scaled to w by h pixels *)
+let render w h s =
+    surface_of_pixbuf (GdkPixbuf.from_file_at_size s ~width:w ~height:h)
 
 (* I/O to the textview *)
 class io (buf : GText.buffer) =
@@ -46,7 +63,7 @@ let insert_cb io iter s = io#insert_cb s
 
 (* we supply an empty pic with which to initialise the nodes; this makes it go
 much faster *)
-let init_pic = GdkPixbuf.create ~width:1 ~height:1 ()
+let init_pic = Cairo.Image.create Cairo.Image.ARGB32 ~w:1 ~h:1
 
 class gui_node group (canvas : GnoCanvas.canvas) (hs_node : node) =
     let f_l = GnoCanvas.group canvas#root in
