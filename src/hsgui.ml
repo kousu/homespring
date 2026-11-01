@@ -2,10 +2,12 @@
 
 open Homespring;;
 open Hscanvas;;
-open GnoCanvas;;
 open Gtk;;
 open GAction;;
 open Printf;;
+
+(* unlike lablgtk2, lablgtk3 doesn't initialise gtk when it is linked in *)
+let _ = GMain.init () in
 
 let delete ev = GMain.Main.quit (); false in
 
@@ -58,7 +60,7 @@ let win = GWindow.window () in
 let vbox = GPack.vbox () in
 let ui = ui_manager () in
 let _ = win#event#connect#delete ~callback:delete in
-win#set_default_size 800 600;
+win#set_default_size ~width:800 ~height:600;
 win#add vbox#coerce;
 
 let page_action f =
@@ -110,11 +112,10 @@ in
 let open_hs name =
     let c = new Hscanvas.canvas name in
     hsroot := List.append !hsroot [c];
-    notebook#append_page
+    ignore (notebook#append_page
         ~tab_label:(GMisc.label
             ~text:(Filename.basename name) ())#coerce
-        c#getPane#coerce;
-    ignore(0);
+        c#getPane#coerce);
 in
 
 let open_file action = 
@@ -157,7 +158,7 @@ in
 let run ac =
     page_action (fun c ->
                     if not c#isRunning then
-                        c#run (Glib.Timeout.add 500 (run_cb c)));
+                        c#run (Glib.Timeout.add ~ms:500 ~callback:(run_cb c)));
     update_sense ();
 in
 let pause ac = page_action (fun c -> c#pause); update_sense () in

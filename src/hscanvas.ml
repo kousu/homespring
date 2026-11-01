@@ -297,7 +297,10 @@ class gui_node (hs_node : node) =
 end;;
 
 class canvas (file : string) =
-    let c = GnoCanvas.canvas () in
+    let c = GMisc.drawing_area () in
+    (* a surface to measure text on, since that needs a cairo context *)
+    let scratch = Cairo.create (Cairo.Image.create Cairo.Image.ARGB32 ~w:1 ~h:1)
+    in
     let t = GText.view () in
     let io = (new io t#buffer) in
     let r = match build_tree file io with
@@ -312,7 +315,7 @@ class canvas (file : string) =
     object(self)
     val mutable state = SnowTick
     val mutable run_id = None
-    val gui_root = new gui_node (GnoCanvas.group c#root) c r
+    val gui_root = new gui_node r
     val root = r
     val scroll1 = GBin.scrolled_window ~vpolicy:`AUTOMATIC ~hpolicy:`AUTOMATIC
         ~vadjustment:scroll1_v ~hadjustment:scroll1_h ()
@@ -339,6 +342,7 @@ class canvas (file : string) =
               | MiscTick -> root#miscTick; state <- InputTick
               | InputTick -> root#inputTick; state <- SnowTick);
             gui_root#update;
+            canvas#misc#queue_draw ();
             flush stdout
         end
     method step =
@@ -355,13 +359,28 @@ class canvas (file : string) =
     method reset =
         root#reset;
         gui_root#update;
+        canvas#misc#queue_draw ();
         run_id <- None;
         state <- SnowTick
+
+    (* the space left of the tree: one icon width *)
+    method margin = zoom *. 16.0
+
+    (* make the drawing area as big as the laid out tree, so that the scrolled
+       window shows scrollbars when it doesn't fit. Leave room for the tree's
+       left edge and a margin below it, as the old canvas scroll region did. *)
+    method update_size =
+        canvas#misc#set_size_request
+            ~width:(int_of_float (gui_root#getWidth +. self#margin))
+            ~height:(int_of_float (gui_root#getHeight +. self#margin *. 2.0))
+            ();
+        canvas#misc#queue_draw ()
 
     method resize =
         let ratio_x = scroll1_h#value /. scroll1_h#upper in
         let ratio_y = scroll1_v#value /. scroll1_v#upper in
-        gui_root#resize zoom;
+        gui_root#resize scratch zoom;
+        self#update_size;
         scroll1_h#set_value (min
             (ratio_x *. scroll1_h#upper)
             (scroll1_h#upper -. scroll1_h#page_size));
@@ -391,29 +410,66 @@ class canvas (file : string) =
         self#resize
 
     initializer
-        gui_root#getCanvas#set_pixels_per_unit 1.0;
-        gui_root#getCanvas#set_center_scroll_region true;
-        gui_root#init;
-        scroll1#add gui_root#getCanvas#coerce;
+        gui_root#init scratch;
+        self#update_size;
+        scroll1#add canvas#coerce;
         scroll2#add text#coerce;
         pane#pack1 ~resize:true ~shrink:true scroll1#coerce;
         pane#pack2 ~shrink:true scroll2#coerce;
 
-        ignore (canvas#event#connect#scroll ~callback:(fun s ->
+        (* a drawing area only gets the events it asks for *)
+        canvas#event#add [`BUTTON_PRESS; `SCROLL; `SMOOTH_SCROLL];
+
+        ignore (canvas#misc#connect#draw ~callback:(fun cr ->
+            Cairo.set_source_rgb cr 1.0 1.0 1.0;
+            Cairo.paint cr;
+            Cairo.translate cr self#margin 0.0;
+            gui_root#draw cr;
+            false));
+
+        ignore (canvas#event#connect#button_press ~callback:(fun b ->
+            if GdkEvent.Button.button b = 1
+               && gui_root#click (GdkEvent.Button.x b -. self#margin)
+                                 (GdkEvent.Button.y b) then
+                canvas#misc#queue_draw ();
+            false));
+
+        (* Act on a scroll of [d] steps (negative is up). Gtk3 reports most
+           wheels and touchpads as "smooth" events carrying fractional
+           deltas rather than UP/DOWN, so zoom steps are accumulated. *)
+        let zoom_acc = ref 0.0 in
+        let scroll_by s d =
             let test x = Gdk.Convert.test_modifier x (GdkEvent.Scroll.state s)
             in
-            let dir = GdkEvent.Scroll.direction s in
-            let d = if dir = `UP || dir = `LEFT then (-.1.0) else 1.0 in
             if test `SHIFT then
                 scroll1_h#set_value (min
                     (scroll1_h#value +. scroll1_h#step_increment *. d)
                     (scroll1_h#upper -. scroll1_h#page_size))
-            else if test `CONTROL then
-                if d < 0.0 then self#zoom_in else self#zoom_out
-            else
+            else if test `CONTROL then begin
+                zoom_acc := !zoom_acc +. d;
+                while !zoom_acc <= -1.0 do
+                    self#zoom_in; zoom_acc := !zoom_acc +. 1.0
+                done;
+                while !zoom_acc >= 1.0 do
+                    self#zoom_out; zoom_acc := !zoom_acc -. 1.0
+                done
+            end else
                 scroll1_v#set_value (min
                     (scroll1_v#value +. scroll1_v#step_increment *. d)
-                    (scroll1_v#upper -. scroll1_v#page_size));
+                    (scroll1_v#upper -. scroll1_v#page_size))
+        in
+        (* gdk may also send the same movement as a discrete event; skip
+           those, recognised by their timestamp *)
+        let last_smooth = ref None in
+        ignore (canvas#event#connect#scroll ~callback:(fun s ->
+            let t = GdkEvent.Scroll.time s in
+            let discrete d = if !last_smooth <> Some t then scroll_by s d in
+            (match GdkEvent.Scroll.direction s with
+                `SMOOTH ->
+                    last_smooth := Some t;
+                    scroll_by s (GdkEvent.Scroll.delta_y s)
+              | `UP | `LEFT -> discrete (-1.0)
+              | `DOWN | `RIGHT -> discrete 1.0);
             true));
 
         (*ignore (scroll1_v#connect#value_changed ~callback:(fun s ->
