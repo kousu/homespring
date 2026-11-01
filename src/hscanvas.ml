@@ -328,6 +328,18 @@ class canvas (file : string) =
     val mutable min_zoom = 0.15
     val mutable max_zoom = 4.0
 
+    (* where to scroll to once gtk has given the drawing area its new size,
+       since the scrollbars can't go that far until then *)
+    val mutable pending_scroll = None
+
+    (* click-drag panning: the last pointer position in viewport coordinates,
+       where the press happened, and whether it has moved far enough yet to
+       count as a drag rather than a click *)
+    val mutable dragging = false
+    val mutable drag_moved = false
+    val mutable drag_origin = (0.0, 0.0)
+    val mutable drag_last = (0.0, 0.0)
+
     method getPane = pane
     method getRoot = gui_root
     method root = gui_root#hs_node
@@ -376,38 +388,38 @@ class canvas (file : string) =
             ();
         canvas#misc#queue_draw ()
 
-    method resize =
-        let ratio_x = scroll1_h#value /. scroll1_h#upper in
-        let ratio_y = scroll1_v#value /. scroll1_v#upper in
+    method scroll_to (x, y) =
+        scroll1_h#set_value x;
+        scroll1_v#set_value y
+
+    (* Zoom to [z], keeping the point at (vx, vy) in the viewport (by default
+       its centre) over the same part of the tree. *)
+    method set_zoom ?(vx = scroll1_h#page_size /. 2.0)
+                    ?(vy = scroll1_v#page_size /. 2.0) z =
+        let ux = (scroll1_h#value +. vx) /. zoom in
+        let uy = (scroll1_v#value +. vy) /. zoom in
+        zoom <- min (max z min_zoom) max_zoom;
         gui_root#resize scratch zoom;
         self#update_size;
-        scroll1_h#set_value (min
-            (ratio_x *. scroll1_h#upper)
-            (scroll1_h#upper -. scroll1_h#page_size));
-        scroll1_v#set_value (min
-            (ratio_y *. scroll1_v#upper)
-            (scroll1_v#upper -. scroll1_v#page_size));
-        flush stdout
+        let target = (ux *. zoom -. vx, uy *. zoom -. vy) in
+        (* this only gets as far as the old size allows; the adjustment
+           callbacks in the initializer finish the job after the resize *)
+        self#scroll_to target;
+        pending_scroll <- Some target;
+        ignore (Glib.Idle.add (fun () -> pending_scroll <- None; false))
 
-    method zoom_in =
-        zoom <- min (zoom *. 1.2) max_zoom;
-        self#resize
+    method zoom_in = self#set_zoom (zoom *. 1.2)
 
-    method zoom_out =
-        zoom <- max (zoom *. (5.0 /. 6.0)) min_zoom;
-        self#resize
+    method zoom_out = self#set_zoom (zoom *. (5.0 /. 6.0))
 
-    method zoom_100 =
-        zoom <- 1.0;
-        self#resize
+    method zoom_100 = self#set_zoom 1.0
 
     method zoom_fit =
         let r = scroll1#misc#allocation in
         let w = float_of_int r.width in
         let h = float_of_int r.height in
         let z = min (w /. gui_root#getWidth) (h /. gui_root#getHeight) in
-        zoom <- min (max (z *. zoom *. 0.9) min_zoom) max_zoom;
-        self#resize
+        self#set_zoom (z *. zoom *. 0.9)
 
     initializer
         gui_root#init scratch;
@@ -418,7 +430,16 @@ class canvas (file : string) =
         pane#pack2 ~shrink:true scroll2#coerce;
 
         (* a drawing area only gets the events it asks for *)
-        canvas#event#add [`BUTTON_PRESS; `SCROLL; `SMOOTH_SCROLL];
+        canvas#event#add [`BUTTON_PRESS; `BUTTON_RELEASE; `BUTTON1_MOTION;
+                          `SCROLL; `SMOOTH_SCROLL];
+
+        (* finish a zoom's scroll once the scrollbars know the new size *)
+        let finish_scroll () = match pending_scroll with
+            Some t -> self#scroll_to t
+          | None -> ()
+        in
+        ignore (scroll1_h#connect#changed ~callback:finish_scroll);
+        ignore (scroll1_v#connect#changed ~callback:finish_scroll);
 
         ignore (canvas#misc#connect#draw ~callback:(fun cr ->
             Cairo.set_source_rgb cr 1.0 1.0 1.0;
@@ -427,47 +448,66 @@ class canvas (file : string) =
             gui_root#draw cr;
             false));
 
+        (* event coordinates are in the drawing area, which scrolls under the
+           viewport; panning works in viewport coordinates, which don't *)
+        let viewport x y = (x -. scroll1_h#value, y -. scroll1_v#value) in
+
+        (* dragging pans; pressing and releasing without moving is a click *)
         ignore (canvas#event#connect#button_press ~callback:(fun b ->
-            if GdkEvent.Button.button b = 1
-               && gui_root#click (GdkEvent.Button.x b -. self#margin)
-                                 (GdkEvent.Button.y b) then
-                canvas#misc#queue_draw ();
+            if GdkEvent.Button.button b = 1 then begin
+                let p = viewport (GdkEvent.Button.x b) (GdkEvent.Button.y b) in
+                dragging <- true;
+                drag_moved <- false;
+                drag_origin <- p;
+                drag_last <- p
+            end;
             false));
 
-        (* Act on a scroll of [d] steps (negative is up). Gtk3 reports most
-           wheels and touchpads as "smooth" events carrying fractional
-           deltas rather than UP/DOWN, so zoom steps are accumulated. *)
-        let zoom_acc = ref 0.0 in
-        let scroll_by s d =
-            let test x = Gdk.Convert.test_modifier x (GdkEvent.Scroll.state s)
+        ignore (canvas#event#connect#motion_notify ~callback:(fun m ->
+            if dragging then begin
+                let (vx, vy) = viewport (GdkEvent.Motion.x m)
+                                        (GdkEvent.Motion.y m) in
+                let (ox, oy) = drag_origin in
+                if not drag_moved && hypot (vx -. ox) (vy -. oy) > 3.0 then
+                    drag_moved <- true;
+                if drag_moved then begin
+                    let (lx, ly) = drag_last in
+                    self#scroll_to (scroll1_h#value +. lx -. vx,
+                                    scroll1_v#value +. ly -. vy)
+                end;
+                drag_last <- (vx, vy)
+            end;
+            false));
+
+        ignore (canvas#event#connect#button_release ~callback:(fun b ->
+            if GdkEvent.Button.button b = 1 then begin
+                if dragging && not drag_moved
+                   && gui_root#click (GdkEvent.Button.x b -. self#margin)
+                                     (GdkEvent.Button.y b) then
+                    canvas#misc#queue_draw ();
+                dragging <- false
+            end;
+            false));
+
+        (* The wheel zooms around the pointer by [d] steps of 1.2x (negative
+           zooms in). Gtk3 reports most wheels and touchpads as "smooth"
+           events carrying fractional deltas rather than UP/DOWN, so zoom by
+           the fraction of a step instead of waiting for a whole one. *)
+        let zoom_by s d =
+            let (vx, vy) = viewport (GdkEvent.Scroll.x s) (GdkEvent.Scroll.y s)
             in
-            if test `SHIFT then
-                scroll1_h#set_value (min
-                    (scroll1_h#value +. scroll1_h#step_increment *. d)
-                    (scroll1_h#upper -. scroll1_h#page_size))
-            else if test `CONTROL then begin
-                zoom_acc := !zoom_acc +. d;
-                while !zoom_acc <= -1.0 do
-                    self#zoom_in; zoom_acc := !zoom_acc +. 1.0
-                done;
-                while !zoom_acc >= 1.0 do
-                    self#zoom_out; zoom_acc := !zoom_acc -. 1.0
-                done
-            end else
-                scroll1_v#set_value (min
-                    (scroll1_v#value +. scroll1_v#step_increment *. d)
-                    (scroll1_v#upper -. scroll1_v#page_size))
+            self#set_zoom ~vx ~vy (zoom *. (1.2 ** (-. d)))
         in
         (* gdk may also send the same movement as a discrete event; skip
            those, recognised by their timestamp *)
         let last_smooth = ref None in
         ignore (canvas#event#connect#scroll ~callback:(fun s ->
             let t = GdkEvent.Scroll.time s in
-            let discrete d = if !last_smooth <> Some t then scroll_by s d in
+            let discrete d = if !last_smooth <> Some t then zoom_by s d in
             (match GdkEvent.Scroll.direction s with
                 `SMOOTH ->
                     last_smooth := Some t;
-                    scroll_by s (GdkEvent.Scroll.delta_y s)
+                    zoom_by s (GdkEvent.Scroll.delta_y s)
               | `UP | `LEFT -> discrete (-1.0)
               | `DOWN | `RIGHT -> discrete 1.0);
             true));
