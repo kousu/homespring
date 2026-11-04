@@ -79,6 +79,9 @@ let page_test f =
         false
 in
 
+(* shows which tick phase just ran, after the toolbar buttons *)
+let phase_label = GMisc.label ~xpad:8 () in
+
 (* widget sensitivity *)
 let update_sense () = 
     let blank_all = ((List.length !hsroot) = 0) in
@@ -88,6 +91,10 @@ let update_sense () =
     let show_r = show_s && page_test (fun n -> not n#isRunning) in
     let show_p = show_s && page_test (fun n -> n#isRunning) in
     let show_b = page_test (fun n -> n#canStepBack && not n#isRunning) in
+
+    let phase = ref "" in
+    page_action (fun n -> phase := n#lastPhase);
+    phase_label#set_text (if !phase = "" then "" else !phase ^ " tick ran");
 
     (ui#get_widget "/MenuBar/ViewMenu/Zoom in")#misc#set_sensitive show_a;
     (ui#get_widget "/MenuBar/ViewMenu/Zoom out")#misc#set_sensitive show_a;
@@ -210,6 +217,10 @@ win#add_accel_group ui#get_accel_group;
 
 let menus = ui#get_widget "/MenuBar" in
 let tool = ui#get_widget "/ToolBar" in
+let phase_item = GButton.tool_item () in
+phase_item#add phase_label#coerce;
+(new GButton.toolbar (GtkButton.Toolbar.cast tool#as_widget))#insert
+    phase_item;
 vbox#pack ~expand:false menus;
 vbox#pack ~expand:false tool;
 vbox#pack ~expand:true ~fill:true notebook#coerce;

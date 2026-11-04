@@ -407,7 +407,16 @@ class canvas (file : string) =
         self#tick_once;
         if not (last || self#isFinished) then self#step
 
-    method canStepBack = match history with [] -> false | _ -> true
+    (* the phase that ran last, or "" at the end of a step *)
+    method lastPhase = match state with
+        SnowTick -> ""
+      | WaterTick -> "Snow"
+      | PowerTick -> "Water"
+      | FishTick -> "Power"
+      | MiscTick -> "Fish"
+      | InputTick -> "Misc"
+
+    method canStepBack =match history with [] -> false | _ -> true
 
     method private undo_one =
         match history with
