@@ -345,9 +345,10 @@ class canvas (file : string) =
     val mutable state = SnowTick
     val mutable run_id = None
 
-    (* for step back: one function per step that undoes it, latest first *)
+    (* for stepping back: for each tick, the phase it ran and a function that
+       undoes it, latest first. 6000 ticks is 1000 steps. *)
     val mutable history = []
-    val max_history = 1000
+    val max_history = 6000
     val gui_root = new gui_node r
     val root = r
     val scroll1 = GBin.scrolled_window ~vpolicy:`AUTOMATIC ~hpolicy:`AUTOMATIC
@@ -390,29 +391,44 @@ class canvas (file : string) =
             canvas#misc#queue_draw ();
             flush stdout
         end
-    method private advance =
-        match state with
-            InputTick -> self#tick
-          | _ -> self#tick; self#advance
+    (* run one tick, first saving how to undo it *)
+    method tick_once =
+        if not self#isFinished then begin
+            let s = state and r = root#save and i = io#save in
+            let undo () = r (); i (); state <- s in
+            history <- List.filteri (fun n _ -> n < max_history)
+                                    ((s, undo) :: history);
+            self#tick
+        end
 
-    (* remember how to get back to the current state *)
-    method private save =
-        let s = state and r = root#save and i = io#save in
-        let undo () = r (); i (); state <- s in
-        history <- List.filteri (fun n _ -> n < max_history) (undo :: history)
-
-    method step = if not self#isFinished then (self#save; self#advance)
-    method tick_once = if not self#isFinished then (self#save; self#tick)
+    (* run ticks to the end of the round, or until the program finishes *)
+    method step =
+        let last = (state = InputTick) in
+        self#tick_once;
+        if not (last || self#isFinished) then self#step
 
     method canStepBack = match history with [] -> false | _ -> true
-    method step_back =
+
+    method private undo_one =
         match history with
-            [] -> ()
-          | undo :: rest ->
-                history <- rest;
-                undo ();
-                gui_root#update;
-                canvas#misc#queue_draw ()
+            [] -> None
+          | (s, undo) :: rest -> history <- rest; undo (); Some s
+
+    method private redraw =
+        gui_root#update;
+        canvas#misc#queue_draw ()
+
+    method tick_back = ignore self#undo_one; self#redraw
+
+    (* undo ticks back to the start of a round: the start of this one if
+       we're partway through, otherwise the start of the one before *)
+    method step_back =
+        let rec go () = match self#undo_one with
+            Some SnowTick | None -> ()
+          | Some _ -> go ()
+        in
+        go ();
+        self#redraw
 
     method run id = run_id <- Some id
     method pause = (match run_id with
