@@ -56,8 +56,36 @@ class io (buf : GText.buffer) =
             else
                 curline <- curline ^ s
 
+    (* for stepping back: the input lines taken so far, latest first, and
+       where each piece of output went, as (offset, length), latest first *)
+    val mutable taken = []
+    val mutable printed = []
+
+    (* Return a function that undoes all input and output since now. Lines
+       typed since then are kept: they go back in the queue after the lines
+       that get un-read. Text is only ever added at the end of the buffer, so
+       the recorded offsets stay valid if removed latest first. *)
+    method save =
+        let nt = List.length taken and np = List.length printed in
+        fun () ->
+            while List.length taken > nt do
+                lines <- hd taken :: lines;
+                taken <- tl taken
+            done;
+            out_flag <- true;
+            while List.length printed > np do
+                let (o, n) = hd printed in
+                buf#delete ~start:(buf#get_iter (`OFFSET o))
+                           ~stop:(buf#get_iter (`OFFSET (o + n)));
+                printed <- tl printed
+            done;
+            out_flag <- false
+
+    method reset_history = taken <- []; printed <- []
+
     method print s =
         out_flag <- true;
+        printed <- (buf#end_iter#offset, Glib.Utf8.length s) :: printed;
         buf#insert ~iter:buf#end_iter s;
         out_flag <- false;
         self#set_unedit
@@ -67,6 +95,7 @@ class io (buf : GText.buffer) =
     method get =
         let ret = hd lines in
         lines <- (tl lines);
+        taken <- ret :: taken;
         ret
 end;;
 
@@ -315,6 +344,10 @@ class canvas (file : string) =
     object(self)
     val mutable state = SnowTick
     val mutable run_id = None
+
+    (* for step back: one function per step that undoes it, latest first *)
+    val mutable history = []
+    val max_history = 1000
     val gui_root = new gui_node r
     val root = r
     val scroll1 = GBin.scrolled_window ~vpolicy:`AUTOMATIC ~hpolicy:`AUTOMATIC
@@ -357,10 +390,29 @@ class canvas (file : string) =
             canvas#misc#queue_draw ();
             flush stdout
         end
-    method step =
+    method private advance =
         match state with
             InputTick -> self#tick
-          | _ -> self#tick; self#step
+          | _ -> self#tick; self#advance
+
+    (* remember how to get back to the current state *)
+    method private save =
+        let s = state and r = root#save and i = io#save in
+        let undo () = r (); i (); state <- s in
+        history <- List.filteri (fun n _ -> n < max_history) (undo :: history)
+
+    method step = if not self#isFinished then (self#save; self#advance)
+    method tick_once = if not self#isFinished then (self#save; self#tick)
+
+    method canStepBack = match history with [] -> false | _ -> true
+    method step_back =
+        match history with
+            [] -> ()
+          | undo :: rest ->
+                history <- rest;
+                undo ();
+                gui_root#update;
+                canvas#misc#queue_draw ()
 
     method run id = run_id <- Some id
     method pause = (match run_id with
@@ -373,6 +425,8 @@ class canvas (file : string) =
         gui_root#update;
         canvas#misc#queue_draw ();
         run_id <- None;
+        history <- [];
+        io#reset_history;
         state <- SnowTick
 
     (* the space left of the tree: one icon width *)

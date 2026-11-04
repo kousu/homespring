@@ -67,7 +67,19 @@ class node name (parent : node option) io =
         born <- [];
         finished <- false;
         iter x children
- 
+
+    (* Record this subtree's state, returning a function that puts it back.
+       Salmon are mutable, so keep copies of them. *)
+    method save : unit -> unit =
+        let copy = map (fun (s : salmon_t) -> {s with name = s.name}) in
+        let w = water and p = power and sn = snow and d = destroyed
+        and sa = copy salmon and b = copy born and f = finished in
+        let kids = map (fun n -> n#save) children in
+        fun () ->
+            water <- w; power <- p; snow <- sn; destroyed <- d;
+            salmon <- copy sa; born <- copy b; finished <- f;
+            iter (fun r -> r ()) kids
+
     method setChNum n =
         ch_number <- n;
 
@@ -364,6 +376,9 @@ and marshy name parent io =
     method givesSnow = give_snow
     method hasSnow = give_snow || snow
     method reset = give_snow <- false; super#reset
+    method save =
+        let g = give_snow and r = super#save in
+        fun () -> give_snow <- g; r ()
 
 end
 and insulated name parent io =

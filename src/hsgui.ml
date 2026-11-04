@@ -28,6 +28,7 @@ let ui_desc =
        <menu action='ActionMenu'>\
            <menuitem action='Run' />\
            <menuitem action='Pause' />\
+           <menuitem action='Step back' />\
            <menuitem action='Step' />\
            <menuitem action='Tick' />\
            <menuitem action='Reset' />\
@@ -44,6 +45,7 @@ let ui_desc =
        <separator />\
        <toolitem action='Run' />\
        <toolitem action='Pause' />\
+       <toolitem action='Step back' />\
        <toolitem action='Step' />\
        <toolitem action='Tick' />\
        <toolitem action='Reset' />\
@@ -83,6 +85,7 @@ let update_sense () =
     let show_a = not blank_all in
     let show_r = show_s && page_test (fun n -> not n#isRunning) in
     let show_p = show_s && page_test (fun n -> n#isRunning) in
+    let show_b = page_test (fun n -> n#canStepBack && not n#isRunning) in
 
     (ui#get_widget "/MenuBar/ViewMenu/Zoom in")#misc#set_sensitive show_a;
     (ui#get_widget "/MenuBar/ViewMenu/Zoom out")#misc#set_sensitive show_a;
@@ -95,11 +98,13 @@ let update_sense () =
 
     (ui#get_widget "/MenuBar/ActionMenu/Run")#misc#set_sensitive show_r;
     (ui#get_widget "/MenuBar/ActionMenu/Pause")#misc#set_sensitive show_p;
+    (ui#get_widget "/MenuBar/ActionMenu/Step back")#misc#set_sensitive show_b;
     (ui#get_widget "/MenuBar/ActionMenu/Step")#misc#set_sensitive show_s;
     (ui#get_widget "/MenuBar/ActionMenu/Tick")#misc#set_sensitive show_s;
     (ui#get_widget "/MenuBar/ActionMenu/Reset")#misc#set_sensitive show_a;
     (ui#get_widget "/ToolBar/Run")#misc#set_sensitive show_r;
     (ui#get_widget "/ToolBar/Pause")#misc#set_sensitive show_p;
+    (ui#get_widget "/ToolBar/Step back")#misc#set_sensitive show_b;
     (ui#get_widget "/ToolBar/Step")#misc#set_sensitive show_s;
     (ui#get_widget "/ToolBar/Tick")#misc#set_sensitive show_s;
     (ui#get_widget "/ToolBar/Reset")#misc#set_sensitive show_a;
@@ -146,7 +151,8 @@ let zoom_out ac = page_action (fun n -> n#zoom_out) in
 let zoom_100 ac = page_action (fun n -> n#zoom_100) in
 let zoom_fit ac = page_action (fun n -> n#zoom_fit) in
 let step ac = page_action (fun c -> c#step); update_sense () in
-let tick ac = page_action (fun c -> c#tick); update_sense () in
+let tick ac = page_action (fun c -> c#tick_once); update_sense () in
+let step_back ac = page_action (fun c -> c#step_back); update_sense () in
 
 let run_cb canvas () =
     canvas#step;
@@ -180,6 +186,9 @@ add_action "Run" ~stock:`MEDIA_PLAY ~label:"_Run" ~accel:"<control>R"
     ~tooltip:"Step every 1/2 second" ~callback:run ac_grp;
 add_action "Pause" ~stock:`MEDIA_PAUSE ~label:"_Pause" ~accel:"F3"
     ~tooltip:"Stop running" ~callback:pause ac_grp;
+add_action "Step back" ~stock:`MEDIA_REWIND ~label:"Step _back"
+    ~accel:"<control>B" ~tooltip:"Undo the last step or tick"
+    ~callback:step_back ac_grp;
 add_action "Step" ~stock:`MEDIA_FORWARD ~label:"_Step" ~accel:"<control>S"
     ~tooltip:"Run a single step" ~callback:step ac_grp;
 add_action "Tick" ~stock:`MEDIA_NEXT ~label:"_Tick" ~accel:"<control>T"
